@@ -1,0 +1,12 @@
+name: demo-securite
+on: push
+jobs:
+  demo:
+    runs-on: [self-hosted, openstack]
+    steps:
+      - run: |
+          echo "Je suis : $(whoami) sur $(hostname)"
+          sudo -n true && echo "sudo sans mot de passe : OUI"
+          ls -l /home/debian/ci-openrc
+          echo "Variables stockees dans ce fichier :"
+          sed 's/=.*//' /home/debian/ci-openrc
