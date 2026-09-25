@@ -2,7 +2,7 @@ heat_template_version: 2018-08-31
 
 description: >
   Infrastructure openstack complète: réseau privé, sous-réseau, routeur,
-  instance et volume attaché - TD5 - Modification HOT
+  instance et volume attaché - TD5 - Branche de Modification HOT 
 
 parameters:
   image:
