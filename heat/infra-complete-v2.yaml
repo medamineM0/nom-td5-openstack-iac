@@ -1,41 +1,48 @@
 heat_template_version: 2018-08-31
 
 description: >
-  Infrastructure openstack complète: réseau privé, sous-réseau, routeur,
-  instance et volume attaché - TD5 - Test de l'approbation
+  Deux serveurs Fedora Caddy derrière un Load Balancer Octavia
 
 parameters:
   image:
     type: string
-    default: cirros-0.6.3-x86_64-disk
+    default: Fedora
+
   flavor:
     type: string
-    default: m1.nano
+    default: m1.small
+
   external_network:
     type: string
     default: public
 
+
 resources:
+
   mon_reseau:
     type: OS::Neutron::Net
     properties:
-      name: reseau-heat
+      name: reseau-web
+
 
   mon_sous_reseau:
     type: OS::Neutron::Subnet
     properties:
-      name: subnet-heat
+      name: subnet-web
       network: { get_resource: mon_reseau }
-      cidr: 10.0.2.0/24
-      gateway_ip: 10.0.2.1
-      dns_nameservers: [8.8.8.8]
+      cidr: 192.168.100.0/24
+      gateway_ip: 192.168.100.1
+      dns_nameservers:
+        - 8.8.8.8
+
 
   mon_routeur:
     type: OS::Neutron::Router
     properties:
-      name: routeur-heat
+      name: routeur-web
       external_gateway_info:
         network: { get_param: external_network }
+
 
   interface_routeur:
     type: OS::Neutron::RouterInterface
@@ -43,65 +50,139 @@ resources:
       router: { get_resource: mon_routeur }
       subnet: { get_resource: mon_sous_reseau }
 
-  sg_ssh:
+
+  sg_web:
     type: OS::Neutron::SecurityGroup
     properties:
-      name: sg-ssh-heat
+      name: sg-web
       rules:
         - protocol: tcp
           port_range_min: 22
           port_range_max: 22
           direction: ingress
 
-  mon_volume:
-    type: OS::Cinder::Volume
-    properties:
-      name: volume-heat
-      size: 1
+        - protocol: tcp
+          port_range_min: 80
+          port_range_max: 80
+          direction: ingress
 
-  mon_instance:
+
+  vm1:
     type: OS::Nova::Server
     properties:
-      name: instance-heat-complete
+      name: VM1
       image: { get_param: image }
       flavor: { get_param: flavor }
       networks:
         - network: { get_resource: mon_reseau }
       security_groups:
-        - { get_resource: sg_ssh }
+        - { get_resource: sg_web }
 
-  mon_instance_2:
+      user_data: |
+        #!/bin/bash
+        dnf install -y caddy
+
+        IP=$(hostname -I | awk '{print $1}')
+
+        cat > /usr/share/caddy/index.html <<EOF
+        <h1>
+        Serveur : VM1
+        <br>
+        Adresse IP privée : $IP
+        </h1>
+        EOF
+
+        systemctl enable caddy
+        systemctl restart caddy
+
+
+  vm2:
     type: OS::Nova::Server
     properties:
-      name: instance-heat-complete-2
+      name: VM2
       image: { get_param: image }
       flavor: { get_param: flavor }
       networks:
         - network: { get_resource: mon_reseau }
       security_groups:
-        - { get_resource: sg_ssh }
+        - { get_resource: sg_web }
 
-  mon_instance_3:
-      type: OS::Nova::Server
-      properties:
-        name: instance-heat-complete-3
-        image: { get_param: image }
-        flavor: { get_param: flavor }
-        networks:
-          - network: { get_resource: mon_reseau }
-        security_groups:
-          - { get_resource: sg_ssh }
+      user_data: |
+        #!/bin/bash
+        dnf install -y caddy
 
-  attachement:
-    type: OS::Cinder::VolumeAttachment
+        IP=$(hostname -I | awk '{print $1}')
+
+        cat > /usr/share/caddy/index.html <<EOF
+        <h1>
+        Serveur : VM2
+        <br>
+        Adresse IP privée : $IP
+        </h1>
+        EOF
+
+        systemctl enable caddy
+        systemctl restart caddy
+
+
+  loadbalancer:
+    type: OS::Octavia::LoadBalancer
     properties:
-      volume_id: { get_resource: mon_volume }
-      instance_uuid: { get_resource: mon_instance }
+      name: web-loadbalancer
+      vip_subnet: { get_resource: mon_sous_reseau }
+
+
+  listener:
+    type: OS::Octavia::Listener
+    properties:
+      name: http-listener
+      loadbalancer: { get_resource: loadbalancer }
+      protocol: HTTP
+      protocol_port: 80
+
+
+  pool:
+    type: OS::Octavia::Pool
+    properties:
+      name: web-pool
+      listener: { get_resource: listener }
+      protocol: HTTP
+      lb_algorithm: ROUND_ROBIN
+
+
+  member_vm1:
+    type: OS::Octavia::PoolMember
+    properties:
+      pool: { get_resource: pool }
+      address: { get_attr: [vm1, first_address] }
+      subnet: { get_resource: mon_sous_reseau }
+      protocol_port: 80
+
+
+  member_vm2:
+    type: OS::Octavia::PoolMember
+    properties:
+      pool: { get_resource: pool }
+      address: { get_attr: [vm2, first_address] }
+      subnet: { get_resource: mon_sous_reseau }
+      protocol_port: 80
+
+
+  floating_ip:
+    type: OS::Neutron::FloatingIP
+    properties:
+      floating_network: { get_param: external_network }
+
+
+  floating_ip_assoc:
+    type: OS::Neutron::FloatingIPAssociation
+    properties:
+      floatingip_id: { get_resource: floating_ip }
+      port_id: { get_attr: [loadbalancer, vip_port_id] }
+
 
 outputs:
-  instance_ip:
-    description: IP privée de l'instance
-    value: { get_attr: [mon_instance, first_address] }
-  instance_id:
-    description: ID de l'instance
-    value: { get_resource: mon_instance }
+
+  loadbalancer_ip:
+    description: IP flottante du Load Balancer
+    value: { get_attr: [floating_ip, floating_ip_address] }
