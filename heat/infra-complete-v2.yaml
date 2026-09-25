@@ -1,21 +1,24 @@
 heat_template_version: 2018-08-31
 
 description: >
-  Infrastructure openstack complète: réseau privé, sous-réseau, routeur,
-  instance et volume attaché - TD5 - Test de l'approbation
+  TD5 Exercice 2 - Deux serveurs Web Fedora Caddy derriere
+  un load balancer Octavia en ROUND_ROBIN
 
 parameters:
-  image:
+  web_image:
     type: string
-    default: cirros-0.6.3-x86_64-disk
-  flavor:
+    default: Fedora-Cloud-Base-37-1.7.x86_64
+
+  web_flavor:
     type: string
-    default: m1.nano
+    default: m1.heat_int
+
   external_network:
     type: string
     default: public
 
 resources:
+
   mon_reseau:
     type: OS::Neutron::Net
     properties:
@@ -28,7 +31,8 @@ resources:
       network: { get_resource: mon_reseau }
       cidr: 10.0.2.0/24
       gateway_ip: 10.0.2.1
-      dns_nameservers: [8.8.8.8]
+      dns_nameservers:
+        - 8.8.8.8
 
   mon_routeur:
     type: OS::Neutron::Router
@@ -43,65 +47,179 @@ resources:
       router: { get_resource: mon_routeur }
       subnet: { get_resource: mon_sous_reseau }
 
-  sg_ssh:
+  sg_web:
     type: OS::Neutron::SecurityGroup
     properties:
-      name: sg-ssh-heat
+      name: sg-web-heat
       rules:
         - protocol: tcp
           port_range_min: 22
           port_range_max: 22
           direction: ingress
+        - protocol: tcp
+          port_range_min: 80
+          port_range_max: 80
+          direction: ingress
+        - protocol: icmp
+          direction: ingress
 
-  mon_volume:
-    type: OS::Cinder::Volume
-    properties:
-      name: volume-heat
-      size: 1
-
-  mon_instance:
+  vm1:
     type: OS::Nova::Server
+    depends_on: interface_routeur
     properties:
-      name: instance-heat-complete
-      image: { get_param: image }
-      flavor: { get_param: flavor }
+      name: vm1
+      image: { get_param: web_image }
+      flavor: { get_param: web_flavor }
       networks:
         - network: { get_resource: mon_reseau }
       security_groups:
-        - { get_resource: sg_ssh }
+        - { get_resource: sg_web }
+      user_data_format: RAW
+      user_data: |
+        #!/bin/bash
+        set -eux
 
-  mon_instance_2:
+        sleep 20
+
+        dnf install -y caddy
+
+        IP=$(hostname -I | awk '{print $1}')
+
+        mkdir -p /var/www/html
+
+        cat > /var/www/html/index.html <<EOF
+        <html>
+        <body>
+        <h1>Serveur : VM1</h1>
+        <p>Adresse IP privee : $IP</p>
+        </body>
+        </html>
+        EOF
+
+        cat > /etc/caddy/Caddyfile <<EOF
+        :80 {
+          root * /var/www/html
+          file_server
+        }
+        EOF
+
+        systemctl enable caddy
+        systemctl restart caddy
+
+  vm2:
     type: OS::Nova::Server
+    depends_on: interface_routeur
     properties:
-      name: instance-heat-complete-2
-      image: { get_param: image }
-      flavor: { get_param: flavor }
+      name: vm2
+      image: { get_param: web_image }
+      flavor: { get_param: web_flavor }
       networks:
         - network: { get_resource: mon_reseau }
       security_groups:
-        - { get_resource: sg_ssh }
+        - { get_resource: sg_web }
+      user_data_format: RAW
+      user_data: |
+        #!/bin/bash
+        set -eux
 
-  mon_instance_3:
-      type: OS::Nova::Server
-      properties:
-        name: instance-heat-complete-3
-        image: { get_param: image }
-        flavor: { get_param: flavor }
-        networks:
-          - network: { get_resource: mon_reseau }
-        security_groups:
-          - { get_resource: sg_ssh }
+        sleep 20
 
-  attachement:
-    type: OS::Cinder::VolumeAttachment
+        dnf install -y caddy
+
+        IP=$(hostname -I | awk '{print $1}')
+
+        mkdir -p /var/www/html
+
+        cat > /var/www/html/index.html <<EOF
+        <html>
+        <body>
+        <h1>Serveur : VM2</h1>
+        <p>Adresse IP privee : $IP</p>
+        </body>
+        </html>
+        EOF
+
+        cat > /etc/caddy/Caddyfile <<EOF
+        :80 {
+          root * /var/www/html
+          file_server
+        }
+        EOF
+
+        systemctl enable caddy
+        systemctl restart caddy
+
+  load_balancer:
+    type: OS::Octavia::LoadBalancer
     properties:
-      volume_id: { get_resource: mon_volume }
-      instance_uuid: { get_resource: mon_instance }
+      name: lb-web
+      vip_subnet: { get_resource: mon_sous_reseau }
+
+  listener_http:
+    type: OS::Octavia::Listener
+    properties:
+      name: listener-http
+      loadbalancer: { get_resource: load_balancer }
+      protocol: HTTP
+      protocol_port: 80
+
+  pool_http:
+    type: OS::Octavia::Pool
+    properties:
+      name: pool-web
+      listener: { get_resource: listener_http }
+      protocol: HTTP
+      lb_algorithm: ROUND_ROBIN
+
+  membre_vm1:
+    type: OS::Octavia::PoolMember
+    properties:
+      pool: { get_resource: pool_http }
+      address: { get_attr: [vm1, first_address] }
+      subnet: { get_resource: mon_sous_reseau }
+      protocol_port: 80
+
+  membre_vm2:
+    type: OS::Octavia::PoolMember
+    properties:
+      pool: { get_resource: pool_http }
+      address: { get_attr: [vm2, first_address] }
+      subnet: { get_resource: mon_sous_reseau }
+      protocol_port: 80
+
+  lb_floating_ip:
+    type: OS::Neutron::FloatingIP
+    properties:
+      floating_network: { get_param: external_network }
+
+  lb_floating_ip_assoc:
+    type: OS::Neutron::FloatingIPAssociation
+    properties:
+      floatingip_id: { get_resource: lb_floating_ip }
+      port_id: { get_attr: [load_balancer, vip_port_id] }
 
 outputs:
+
   instance_ip:
-    description: IP privée de l'instance
-    value: { get_attr: [mon_instance, first_address] }
+    description: IP privee VM1
+    value: { get_attr: [vm1, first_address] }
+
   instance_id:
-    description: ID de l'instance
-    value: { get_resource: mon_instance }
+    description: ID VM1
+    value: { get_resource: vm1 }
+
+  vm1_ip:
+    description: IP privee VM1
+    value: { get_attr: [vm1, first_address] }
+
+  vm2_ip:
+    description: IP privee VM2
+    value: { get_attr: [vm2, first_address] }
+
+  lb_vip:
+    description: VIP privee du load balancer
+    value: { get_attr: [load_balancer, vip_address] }
+
+  lb_floating_ip:
+    description: IP flottante publique du load balancer
+    value: { get_attr: [lb_floating_ip, floating_ip_address] }
